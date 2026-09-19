@@ -7,6 +7,10 @@ on:
     branches: [main, master]
   workflow_dispatch: # 允许手动触发
 
+# 设置环境变量解决 Node.js 弃用问题
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build-ubuntu-gcc:
     runs-on: ubuntu-latest
@@ -83,17 +87,25 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure CMake
+        # PowerShell 中使用分号连接命令，或使用多行字符串的正确语法
         run: |
-          cmake -B ${{github.workspace}}/build \
+          $buildDir = "${{github.workspace}}\build"
+          cmake -B $buildDir `
                 -DCMAKE_BUILD_TYPE=${{matrix.build-type}}
 
       - name: Build
         run: |
-          cmake --build ${{github.workspace}}/build --config ${{matrix.build-type}}
+          $buildDir = "${{github.workspace}}\build"
+          cmake --build $buildDir --config ${{matrix.build-type}}
 
       - name: Run executable
         run: |
-          ${{github.workspace}}/build/${{matrix.build-type}}/CompilerOSInfo.exe
+          $buildDir = "${{github.workspace}}\build"
+          if (${{matrix.build-type}} -eq "Debug") {
+            & "$buildDir\Debug\CompilerOSInfo.exe"
+          } else {
+            & "$buildDir\Release\CompilerOSInfo.exe"
+          }
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -101,7 +113,6 @@ jobs:
           name: windows-msvc-${{matrix.build-type}}
           path: |
             ${{github.workspace}}/build/${{matrix.build-type}}/CompilerOSInfo.exe
-            ${{github.workspace}}/build/CMakeCache.txt
 
   build-windows-mingw:
     runs-on: windows-latest
