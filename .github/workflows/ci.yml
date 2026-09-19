@@ -7,180 +7,154 @@ on:
     branches: [main, master]
   workflow_dispatch: # 允许手动触发
 
-# 设置环境变量解决 Node.js 弃用问题
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # 所有平台、所有生成器的产物统一落在 <build>/bin
+  BUILD_DIR: ${{ github.workspace }}/build
 
 jobs:
   build-ubuntu-gcc:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         build-type: [Release, Debug]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Configure CMake
         run: |
-          cmake -B ${{github.workspace}}/build \
-                -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
+          cmake -B "$BUILD_DIR" \
+                -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
                 -DCMAKE_C_COMPILER=gcc
 
       - name: Build
-        run: |
-          cmake --build ${{github.workspace}}/build --config ${{matrix.build-type}}
+        run: cmake --build "$BUILD_DIR" --config ${{ matrix.build-type }}
 
       - name: Run executable
-        run: |
-          ${{github.workspace}}/build/CompilerOSInfo
+        run: "$BUILD_DIR/bin/CompilerOSInfo"
+
+      - name: Test
+        run: ctest --test-dir "$BUILD_DIR" -C ${{ matrix.build-type }} --output-on-failure
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-gcc-${{matrix.build-type}}
-          path: |
-            ${{github.workspace}}/build/CompilerOSInfo
-            ${{github.workspace}}/build/CMakeCache.txt
+          name: ubuntu-gcc-${{ matrix.build-type }}
+          path: ${{ env.BUILD_DIR }}/bin/CompilerOSInfo*
+          if-no-files-found: error
 
   build-macos-clang:
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
         build-type: [Release, Debug]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Configure CMake
         run: |
-          cmake -B ${{github.workspace}}/build \
-                -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
+          cmake -B "$BUILD_DIR" \
+                -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
                 -DCMAKE_C_COMPILER=clang
 
       - name: Build
-        run: |
-          cmake --build ${{github.workspace}}/build --config ${{matrix.build-type}}
+        run: cmake --build "$BUILD_DIR" --config ${{ matrix.build-type }}
 
       - name: Run executable
-        run: |
-          ${{github.workspace}}/build/CompilerOSInfo
+        run: "$BUILD_DIR/bin/CompilerOSInfo"
+
+      - name: Test
+        run: ctest --test-dir "$BUILD_DIR" -C ${{ matrix.build-type }} --output-on-failure
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: macos-clang-${{matrix.build-type}}
-          path: |
-            ${{github.workspace}}/build/CompilerOSInfo
-            ${{github.workspace}}/build/CMakeCache.txt
+          name: macos-clang-${{ matrix.build-type }}
+          path: ${{ env.BUILD_DIR }}/bin/CompilerOSInfo*
+          if-no-files-found: error
 
   build-windows-msvc:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         build-type: [Release, Debug]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Configure CMake
-        # PowerShell 中使用分号连接命令，或使用多行字符串的正确语法
+        # 多配置生成器：CMAKE_BUILD_TYPE 无效，配置由 --config 决定
         run: |
-          $buildDir = "${{github.workspace}}\build"
-          cmake -B $buildDir `
-                -DCMAKE_BUILD_TYPE=${{matrix.build-type}}
+          cmake -B "${{ env.BUILD_DIR }}" `
+                -G "Visual Studio 17 2022" -A x64
 
       - name: Build
-        run: |
-          $buildDir = "${{github.workspace}}\build"
-          cmake --build $buildDir --config ${{matrix.build-type}}
+        run: cmake --build "${{ env.BUILD_DIR }}" --config ${{ matrix.build-type }}
 
       - name: Run executable
         run: |
-          $buildDir = "${{github.workspace}}\build"
-          if (${{matrix.build-type}} -eq "Debug") {
-            & "$buildDir\Debug\CompilerOSInfo.exe"
-          } else {
-            & "$buildDir\Release\CompilerOSInfo.exe"
-          }
+          $exe = "${{ env.BUILD_DIR }}\bin\CompilerOSInfo.exe"
+          if (-not (Test-Path $exe)) { throw "Not found: $exe" }
+          & $exe
+
+      - name: Test
+        run: ctest --test-dir "${{ env.BUILD_DIR }}" -C ${{ matrix.build-type }} --output-on-failure
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-msvc-${{matrix.build-type}}
-          path: |
-            ${{github.workspace}}/build/${{matrix.build-type}}/CompilerOSInfo.exe
+          name: windows-msvc-${{ matrix.build-type }}
+          path: ${{ env.BUILD_DIR }}/bin/CompilerOSInfo.exe
+          if-no-files-found: error
 
   build-windows-mingw:
     runs-on: windows-latest
     strategy:
+      fail-fast: false
       matrix:
         build-type: [Release, Debug]
         mingw-arch: [x86_64, i686]
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
       - name: Setup MinGW
         uses: msys2/setup-msys2@v2
         with:
-          update: true
-          install: mingw-w64-${{matrix.mingw-arch}}-toolchain mingw-w64-${{matrix.mingw-arch}}-cmake
+          # 关键：显式切换 msystem，否则 i686 会用上 64 位的 PATH
+          msystem: ${{ matrix.mingw-arch == 'x86_64' && 'MINGW64' || 'MINGW32' }}
+          update: false
+          install: >-
+            mingw-w64-${{ matrix.mingw-arch }}-toolchain
+            mingw-w64-${{ matrix.mingw-arch }}-cmake
 
       - name: Configure CMake (MinGW)
         shell: msys2 {0}
         run: |
-          # 设置MINGW路径
-          if [ "${{matrix.mingw-arch}}" = "x86_64" ]; then
-            export CC=/mingw64/bin/gcc.exe
-            export CXX=/mingw64/bin/g++.exe
-            BUILD_DIR="${{github.workspace}}/build-mingw64"
-          else
-            export CC=/mingw32/bin/gcc.exe
-            export CXX=/mingw32/bin/g++.exe
-            BUILD_DIR="${{github.workspace}}/build-mingw32"
-          fi
-
-          cmake -B $BUILD_DIR \
-                -DCMAKE_BUILD_TYPE=${{matrix.build-type}} \
-                -DCMAKE_C_COMPILER=$CC \
+          cmake -B "$BUILD_DIR" \
+                -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
                 -G "MinGW Makefiles"
 
       - name: Build (MinGW)
         shell: msys2 {0}
-        run: |
-          if [ "${{matrix.mingw-arch}}" = "x86_64" ]; then
-            BUILD_DIR="${{github.workspace}}/build-mingw64"
-          else
-            BUILD_DIR="${{github.workspace}}/build-mingw32"
-          fi
-
-          cmake --build $BUILD_DIR --config ${{matrix.build-type}}
+        run: cmake --build "$BUILD_DIR" --config ${{ matrix.build-type }}
 
       - name: Run executable (MinGW)
         shell: msys2 {0}
-        run: |
-          if [ "${{matrix.mingw-arch}}" = "x86_64" ]; then
-            BUILD_DIR="${{github.workspace}}/build-mingw64"
-          else
-            BUILD_DIR="${{github.workspace}}/build-mingw32"
-          fi
-
-          $BUILD_DIR/CompilerOSInfo.exe
+        run: "$BUILD_DIR/bin/CompilerOSInfo.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-mingw-${{matrix.mingw-arch}}-${{matrix.build-type}}
-          path: |
-            ${{github.workspace}}/build-mingw*/CompilerOSInfo.exe
-            ${{github.workspace}}/build-mingw*/CMakeCache.txt
+          name: windows-mingw-${{ matrix.mingw-arch }}-${{ matrix.build-type }}
+          path: ${{ env.BUILD_DIR }}/bin/CompilerOSInfo.exe
+          if-no-files-found: error
 
-  # 可选：添加所有构建的汇总
   summary:
     runs-on: ubuntu-latest
     needs:
@@ -198,16 +172,18 @@ jobs:
       - name: List artifacts
         run: |
           echo "All builds completed successfully!"
-          find . -name "CompilerOSInfo*" -o -name "*.exe" | sort
-          echo "Total executables: $(find . -name "CompilerOSInfo*" -o -name "*.exe" | wc -l)"
+          find . -name "CompilerOSInfo*" | sort
+          echo "Total executables: $(find . -name 'CompilerOSInfo*' | wc -l)"
 
       - name: Create summary
         run: |
-          echo "# Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "All builds completed successfully!" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "## Build Matrix:" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Ubuntu + GCC" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ macOS + Clang" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Windows + MSVC" >> $GITHUB_STEP_SUMMARY
-          echo "- ✅ Windows + MinGW-w64 (x86_64 and i686)" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "# Build Summary"
+            echo "All builds completed successfully!"
+            echo ""
+            echo "## Build Matrix:"
+            echo "- ✅ Ubuntu + GCC (Release / Debug)"
+            echo "- ✅ macOS + Clang (Release / Debug)"
+            echo "- ✅ Windows + MSVC (Release / Debug)"
+            echo "- ✅ Windows + MinGW-w64 (x86_64 / i686 × Release / Debug)"
+          } >> "$GITHUB_STEP_SUMMARY"
