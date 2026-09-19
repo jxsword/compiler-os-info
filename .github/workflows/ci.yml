@@ -19,15 +19,34 @@ jobs:
       fail-fast: false
       matrix:
         build-type: [Release, Debug]
+        arch: [x86_64, x86]
 
     steps:
       - uses: actions/checkout@v4
 
+      # 32 位前置条件：multilib 工具链 + 32 位运行时库
+      - name: Install 32-bit toolchain
+        if: matrix.arch == 'x86'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -y
+          sudo apt-get install -y gcc-multilib libc6:i386
+
+      - name: Verify 32-bit toolchain
+        if: matrix.arch == 'x86'
+        run: |
+          printf 'int main(void){return 0;}' > /tmp/t32.c
+          gcc -m32 /tmp/t32.c -o /tmp/t32
+          /tmp/t32 && echo "32-bit compile+run OK"
+          file /tmp/t32
+
       - name: Configure CMake
         run: |
-          cmake -B "$BUILD_DIR" \
-                -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
-                -DCMAKE_C_COMPILER=gcc
+          CMAKE_ARGS=(-DCMAKE_BUILD_TYPE=${{ matrix.build-type }} -DCMAKE_C_COMPILER=gcc)
+          if [ "${{ matrix.arch }}" = "x86" ]; then
+            CMAKE_ARGS+=(-DCMAKE_C_FLAGS=-m32 -DCMAKE_EXE_LINKER_FLAGS=-m32)
+          fi
+          cmake -B "$BUILD_DIR" "${CMAKE_ARGS[@]}"
 
       - name: Build
         run: cmake --build "$BUILD_DIR" --config ${{ matrix.build-type }}
@@ -35,13 +54,22 @@ jobs:
       - name: Run executable
         run: "$BUILD_DIR/bin/CompilerOSInfo"
 
+      - name: Verify architecture
+        run: |
+          file "$BUILD_DIR/bin/CompilerOSInfo"
+          if [ "${{ matrix.arch }}" = "x86" ]; then
+            file -b "$BUILD_DIR/bin/CompilerOSInfo" | grep -q "ELF 32-bit"
+          else
+            file -b "$BUILD_DIR/bin/CompilerOSInfo" | grep -q "ELF 64-bit"
+          fi
+
       - name: Test
         run: ctest --test-dir "$BUILD_DIR" -C ${{ matrix.build-type }} --output-on-failure
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ubuntu-gcc-${{ matrix.build-type }}
+          name: ubuntu-gcc-${{ matrix.arch }}-${{ matrix.build-type }}
           path: ${{ env.BUILD_DIR }}/bin/CompilerOSInfo*
           if-no-files-found: error
 
@@ -83,16 +111,31 @@ jobs:
       fail-fast: false
       matrix:
         build-type: [Release, Debug]
+        arch: [x64, x86]
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Configure CMake
-        # 不要写死 -G "Visual Studio 17 2022"：windows-latest 自 2026-06 起
-        # 只带 VS 2026 (v18)，写死会让 CMake 找不到实例。
-        # 省略 -G 后 CMake 自动选机器上最新的 VS，对 VS2022/VS2026 镜像都兼容。
+      # 前置检查：确认镜像上确实带 x86/x64 MSVC 工具集
+      # （windows-latest 自 2026-06 起是 VS 2026 镜像，只移除了 ARM32，x86 仍在，
+      #   但若将来再变，这一步会立刻给出可读的失败原因）
+      - name: Assert MSVC x86/x64 toolset present
+        shell: pwsh
         run: |
-          cmake -B "${{ env.BUILD_DIR }}" -A x64
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $path = & $vswhere -latest -products * `
+                    -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+                    -property installationPath
+          if (-not $path) {
+            throw "MSVC x86/x64 toolset not found on this image. Use runs-on: windows-2022 instead."
+          }
+          Write-Host "Visual Studio at: $path"
+
+      - name: Configure CMake
+        # 不要写死 -G "Visual Studio 17 2022"：windows-latest 自 2026-06 起只带 VS 2026。
+        # 省略 -G 让 CMake 自动选最新的 VS；-A Win32 生成 32 位。
+        run: |
+          cmake -B "${{ env.BUILD_DIR }}" -A ${{ matrix.arch == 'x86' && 'Win32' || 'x64' }}
 
       - name: Build
         run: cmake --build "${{ env.BUILD_DIR }}" --config ${{ matrix.build-type }}
@@ -103,13 +146,26 @@ jobs:
           if (-not (Test-Path $exe)) { throw "Not found: $exe" }
           & $exe
 
+      - name: Verify architecture
+        shell: pwsh
+        run: |
+          $exe = "${{ env.BUILD_DIR }}\bin\CompilerOSInfo.exe"
+          $bytes = [System.IO.File]::ReadAllBytes($exe)
+          $pe    = [BitConverter]::ToInt32($bytes, 0x3C)
+          $machine = [BitConverter]::ToUInt16($bytes, $pe + 4)
+          $expected = if ("${{ matrix.arch }}" -eq "x86") { 0x014c } else { 0x8664 }
+          if ($machine -ne $expected) {
+            throw "Unexpected PE machine 0x$('{0:x4}' -f $machine), expected 0x$('{0:x4}' -f $expected)"
+          }
+          Write-Host "PE machine OK: 0x$('{0:x4}' -f $machine)"
+
       - name: Test
         run: ctest --test-dir "${{ env.BUILD_DIR }}" -C ${{ matrix.build-type }} --output-on-failure
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-msvc-${{ matrix.build-type }}
+          name: windows-msvc-${{ matrix.arch }}-${{ matrix.build-type }}
           path: ${{ env.BUILD_DIR }}/bin/CompilerOSInfo.exe
           if-no-files-found: error
 
@@ -119,7 +175,7 @@ jobs:
       fail-fast: false
       matrix:
         build-type: [Release, Debug]
-        mingw-arch: [x86_64, i686]
+        arch: [x86_64, x86] # x86 -> i686 (MINGW32)
 
     steps:
       - uses: actions/checkout@v4
@@ -127,32 +183,32 @@ jobs:
       - name: Setup MinGW
         uses: msys2/setup-msys2@v2
         with:
-          # 关键：显式切换 msystem，否则 i686 会用上 64 位的 PATH
-          msystem: ${{ matrix.mingw-arch == 'x86_64' && 'MINGW64' || 'MINGW32' }}
+          # 关键：显式切换 msystem，否则 32 位会用上 64 位的 PATH
+          msystem: ${{ matrix.arch == 'x86_64' && 'MINGW64' || 'MINGW32' }}
           update: false
           install: >-
-            mingw-w64-${{ matrix.mingw-arch }}-toolchain
-            mingw-w64-${{ matrix.mingw-arch }}-cmake
+            mingw-w64-${{ matrix.arch == 'x86' && 'i686' || 'x86_64' }}-toolchain
+            mingw-w64-${{ matrix.arch == 'x86' && 'i686' || 'x86_64' }}-cmake
 
       - name: Configure CMake (MinGW)
         shell: msys2 {0}
         run: |
-          cmake -B "$BUILD_DIR" \
+          cmake -B "${{ github.workspace }}/build" \
                 -DCMAKE_BUILD_TYPE=${{ matrix.build-type }} \
                 -G "MinGW Makefiles"
 
       - name: Build (MinGW)
         shell: msys2 {0}
-        run: cmake --build "$BUILD_DIR" --config ${{ matrix.build-type }}
+        run: cmake --build "${{ github.workspace }}/build" --config ${{ matrix.build-type }}
 
       - name: Run executable (MinGW)
         shell: msys2 {0}
-        run: "$BUILD_DIR/bin/CompilerOSInfo.exe"
+        run: "${{ github.workspace }}/build/bin/CompilerOSInfo.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-mingw-${{ matrix.mingw-arch }}-${{ matrix.build-type }}
+          name: windows-mingw-${{ matrix.arch }}-${{ matrix.build-type }}
           path: ${{ env.BUILD_DIR }}/bin/CompilerOSInfo.exe
           if-no-files-found: error
 
@@ -183,8 +239,8 @@ jobs:
             echo "All builds completed successfully!"
             echo ""
             echo "## Build Matrix:"
-            echo "- ✅ Ubuntu + GCC (Release / Debug)"
+            echo "- ✅ Ubuntu + GCC (x86_64 / x86 × Release / Debug)"
             echo "- ✅ macOS + Clang (Release / Debug)"
-            echo "- ✅ Windows + MSVC (Release / Debug)"
+            echo "- ✅ Windows + MSVC (x64 / Win32 × Release / Debug)"
             echo "- ✅ Windows + MinGW-w64 (x86_64 / i686 × Release / Debug)"
           } >> "$GITHUB_STEP_SUMMARY"
